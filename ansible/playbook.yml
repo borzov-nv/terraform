@@ -1,0 +1,197 @@
+---
+# 1. Common setup for all servers
+- name: Basic Setup
+  hosts: all
+  become: yes
+  tasks:
+    - name: Update apt cache
+      apt: { update_cache: yes }
+
+# 2. Configure Webservers (Nginx + Filebeat + Zabbix Agent)
+- name: Webserver Configuration
+  hosts: webservers
+  become: yes
+  tasks:
+    - name: Install Nginx
+      apt: { name: nginx, state: present }
+
+    - name: Download Filebeat deb package
+      get_url:
+        url: "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-9.2.3-amd64.deb"
+        dest: "/tmp/filebeat.deb"
+        mode: '0644'
+
+    - name: Install Filebeat from downloaded package
+      apt:
+        deb: "/tmp/filebeat.deb"
+      notify: Restart Filebeat
+
+    - name: Configure Filebeat (Ship to Elastic)
+      lineinfile:
+        path: /etc/filebeat/filebeat.yml
+        regexp: 'hosts: \["localhost:9200"\]'
+        line: '  hosts: ["elasticsearch.ru-central1-a.internal:9200"]'
+      notify: Restart Filebeat
+
+    - name: Install Zabbix Agent
+      apt: { name: zabbix-agent, state: present }
+
+    - name: Point Zabbix Agent to Server
+      lineinfile:
+        path: /etc/zabbix/zabbix_agentd.conf
+        regexp: '^Server='
+        line: "Server=zabbix.ru-central1-a.internal"
+      notify: Restart Zabbix Agent
+
+  handlers:
+    - name: Restart Filebeat
+      service: { name: filebeat, state: restarted }
+    - name: Restart Zabbix Agent
+      service: { name: zabbix-agent, state: restarted }
+
+- name: Setup Zabbix Server, DB, and Frontend
+  hosts: zabbix
+  become: yes
+  tasks:
+    - name: Install MySQL and PHP dependencies
+      apt: 
+        name:
+          - nginx                # The web server
+          - mysql-server         # The database
+          - python3-pymysql      # Ansible's bridge to MySQL
+          - php-fpm              # PHP engine for the Zabbix UI
+          - php-mysql            # Connects PHP to MySQL
+          - zabbix-server-mysql  # The actual Zabbix engine
+          - zabbix-frontend-php  # The UI source code
+          - zabbix-nginx-conf    # Pre-made Nginx config for Zabbix
+        state: present
+        update_cache: yes
+
+    - name: Enable Zabbix Nginx config
+      shell: |
+        sed -i 's/# listen 80;/listen 80;/' /etc/zabbix/nginx.conf
+        sed -i 's/# server_name example.com;/server_name _;/' /etc/zabbix/nginx.conf
+      # The "_" means it will respond to any IP/Hostname hitting port 80
+
+    - name: Ensure MySQL is running
+      service: { name: mysql, state: started, enabled: yes }
+
+    - name: Create Zabbix Database
+      mysql_db:
+        name: zabbix
+        encoding: utf8mb4
+        collation: utf8mb4_bin
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create Zabbix DB User
+      mysql_user:
+        name: zabbix
+        password: "{{ db_password }}"
+        priv: 'zabbix.*:ALL'
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Import Initial Zabbix Schema
+      shell: zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql -uzabbix -p{{ db_password }} zabbix
+      args:
+        creates: /var/lib/mysql/zabbix/users.ibd # Only runs if DB is empty
+
+    - name: Configure Zabbix Server to use the DB
+      lineinfile:
+        path: /etc/zabbix/zabbix_server.conf
+        regexp: '^# DBPassword='
+        line: "DBPassword={{ db_password }}"
+
+    - name: Restart Zabbix and Nginx
+      service:
+        name: "{{ item }}"
+        state: restarted
+        enabled: yes
+      loop: [zabbix-server, nginx, php8.1-fpm]
+
+- name: Setup Elasticsearch (Native Package)
+  hosts: elastic
+  become: yes
+  tasks:
+    - name: Install System Dependencies
+      apt:
+        name:
+          - openjdk-17-jdk     # Standard Java environment
+          - wget                # For downloading the package
+          - apt-transport-https # For secure communication
+          - gnupg               # For handling keys (if needed)
+        state: present
+        update_cache: yes
+
+    - name: Increase Virtual Memory (mmap counts)
+      # Elasticsearch requires this to be at least 262144
+      sysctl:
+        name: vm.max_map_count
+        value: '262144'
+        state: present
+        reload: yes
+
+    - name: Download Elasticsearch 8.11.0
+      get_url:
+        url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-9.2.3-amd64.deb"
+        dest: "/tmp/elasticsearch.deb"
+        mode: '0644'
+
+    - name: Install Elasticsearch from deb
+      apt:
+        deb: "/tmp/elasticsearch.deb"
+
+    - name: Set JVM Heap Size (Memory Dependency)
+      # Since you have 8GB RAM, we dedicate 4GB to the Heap
+      copy:
+        dest: /etc/elasticsearch/jvm.options.d/heap.options
+        content: |
+          -Xms4g
+          -Xmx4g
+        owner: root
+        group: elasticsearch
+        mode: '0660'
+
+    - name: Configure Elasticsearch for External Access
+      lineinfile:
+        path: /etc/elasticsearch/elasticsearch.yml
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^#network.host:', line: 'network.host: 0.0.0.0' }
+        - { regexp: '^xpack.security.enabled:', line: 'xpack.security.enabled: false' }
+        - { regexp: '^discovery.type:', line: 'discovery.type: single-node' }
+
+    - name: Ensure Elasticsearch is started and enabled
+      service:
+        name: elasticsearch
+        state: started
+        enabled: yes
+
+- name: Setup Kibana (Native Package)
+  hosts: kibana
+  become: yes
+  tasks:
+    - name: Download Kibana 8.11.0
+      get_url:
+        url: "https://artifacts.elastic.co/downloads/kibana/kibana-9.2.3-amd64.deb"
+        dest: "/tmp/kibana.deb"
+        mode: '0644'
+
+    - name: Install Kibana
+      apt:
+        deb: "/tmp/kibana.deb"
+
+    - name: Configure Kibana
+      lineinfile:
+        path: /etc/kibana/kibana.yml
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^#server.host:', line: 'server.host: "0.0.0.0"' }
+        - { regexp: '^#elasticsearch.hosts:', line: 'elasticsearch.hosts: ["http://elasticsearch.ru-central1-a.internal:9200"]' }
+
+    - name: Start Kibana
+      service:
+        name: kibana
+        state: started
+        enabled: yes
