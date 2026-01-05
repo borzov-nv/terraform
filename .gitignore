@@ -1,4 +1,6 @@
 **/.terraform/*
+.ansible*
+.vscode*
 .terraform*
 !.terraformrc
 *.tfstate

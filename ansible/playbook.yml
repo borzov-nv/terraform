@@ -1,32 +1,49 @@
 ---
-# 1. Common setup for all servers
+# 1. ALL
 - name: Basic Setup
   hosts: all
   become: yes
   tasks:
     - name: Update apt cache
-      apt: { update_cache: yes }
+      apt:
+        update_cache: yes
 
-# 2. Configure Webservers (Nginx + Filebeat + Zabbix Agent)
+# 2. WEB
 - name: Webserver Configuration
   hosts: webservers
   become: yes
   tasks:
     - name: Install Nginx
-      apt: { name: nginx, state: present }
+      apt: 
+        name: nginx
+        state: present
 
-    - name: Download Filebeat deb package
+    - name: Create custom index.html
+      copy:
+        content: |
+          <html>
+          <head><title>Netology - BorzovES</title></head>
+          <body>
+            <h1>Это {{ inventory_hostname }}</h1>
+            <p>It's alive!</p>
+          </body>
+          </html>
+        dest: /var/www/html/index.html
+        #owner: www-data
+        #group: www-data
+        #mode: '0644'
+
+    - name: Download Filebeat
       get_url:
-        url: "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-9.2.3-amd64.deb"
+        url: "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-{{ elastic_version }}-amd64.deb"
         dest: "/tmp/filebeat.deb"
         mode: '0644'
 
-    - name: Install Filebeat from downloaded package
+    - name: Install Filebeat
       apt:
         deb: "/tmp/filebeat.deb"
-      notify: Restart Filebeat
 
-    - name: Configure Filebeat (Ship to Elastic)
+    - name: Configure Filebeat
       lineinfile:
         path: /etc/filebeat/filebeat.yml
         regexp: 'hosts: \["localhost:9200"\]'
@@ -34,7 +51,9 @@
       notify: Restart Filebeat
 
     - name: Install Zabbix Agent
-      apt: { name: zabbix-agent, state: present }
+      apt:
+        name: zabbix-agent
+        state: present
 
     - name: Point Zabbix Agent to Server
       lineinfile:
@@ -45,36 +64,62 @@
 
   handlers:
     - name: Restart Filebeat
-      service: { name: filebeat, state: restarted }
+      service:
+        name: filebeat
+        state: restarted
     - name: Restart Zabbix Agent
-      service: { name: zabbix-agent, state: restarted }
+      service:
+        name: zabbix-agent
+        state: restarted
 
+# 3. ZABBIX
 - name: Setup Zabbix Server, DB, and Frontend
   hosts: zabbix
   become: yes
   tasks:
-    - name: Install MySQL and PHP dependencies
+    - name: Download Zabbix Release Package
+      get_url:
+        url: "https://repo.zabbix.com/zabbix/7.4/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.4+ubuntu22.04_all.deb"
+        dest: "/tmp/zabbix-release.deb"
+
+    - name: Install Zabbix Repo
+      apt:
+        deb: "/tmp/zabbix-release.deb"
+
+    - name: Update apt cache
+      apt: 
+        update_cache: yes
+
+    - name: Install MySQL, PHP, and Zabbix dependencies
       apt: 
         name:
-          - nginx                # The web server
-          - mysql-server         # The database
-          - python3-pymysql      # Ansible's bridge to MySQL
-          - php-fpm              # PHP engine for the Zabbix UI
-          - php-mysql            # Connects PHP to MySQL
-          - zabbix-server-mysql  # The actual Zabbix engine
-          - zabbix-frontend-php  # The UI source code
-          - zabbix-nginx-conf    # Pre-made Nginx config for Zabbix
+          - nginx
+          - mysql-server
+          - python3-pymysql
+          - php-fpm
+          - php-mysql
+          - zabbix-sql-scripts
+          - zabbix-server-mysql
+          - zabbix-frontend-php
+          - zabbix-nginx-conf
         state: present
-        update_cache: yes
 
     - name: Enable Zabbix Nginx config
       shell: |
         sed -i 's/# listen 80;/listen 80;/' /etc/zabbix/nginx.conf
         sed -i 's/# server_name example.com;/server_name _;/' /etc/zabbix/nginx.conf
-      # The "_" means it will respond to any IP/Hostname hitting port 80
+
+    - name: Symlink Zabbix Nginx config
+      file:
+        src: /etc/zabbix/nginx.conf
+        dest: /etc/nginx/conf.d/zabbix.conf
+        state: link
 
     - name: Ensure MySQL is running
-      service: { name: mysql, state: started, enabled: yes }
+      service:
+        name: mysql
+        state: started
+        enabled: yes
 
     - name: Create Zabbix Database
       mysql_db:
@@ -90,10 +135,22 @@
         priv: 'zabbix.*:ALL'
         login_unix_socket: /var/run/mysqld/mysqld.sock
 
+    - name: Enable trust_function_creators for import
+      mysql_variables:
+        variable: log_bin_trust_function_creators
+        value: '1'
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
     - name: Import Initial Zabbix Schema
       shell: zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql -uzabbix -p{{ db_password }} zabbix
       args:
-        creates: /var/lib/mysql/zabbix/users.ibd # Only runs if DB is empty
+        creates: /var/lib/mysql/zabbix/users.ibd
+
+    - name: Disable trust_function_creators after import
+      mysql_variables:
+        variable: log_bin_trust_function_creators
+        value: '0'
+        login_unix_socket: /var/run/mysqld/mysqld.sock
 
     - name: Configure Zabbix Server to use the DB
       lineinfile:
@@ -101,13 +158,14 @@
         regexp: '^# DBPassword='
         line: "DBPassword={{ db_password }}"
 
-    - name: Restart Zabbix and Nginx
+    - name: Start Services
       service:
         name: "{{ item }}"
         state: restarted
         enabled: yes
       loop: [zabbix-server, nginx, php8.1-fpm]
 
+# 4. ES
 - name: Setup Elasticsearch (Native Package)
   hosts: elastic
   become: yes
@@ -132,7 +190,7 @@
 
     - name: Download Elasticsearch 8.11.0
       get_url:
-        url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-9.2.3-amd64.deb"
+        url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{ elastic_version }}-amd64.deb"
         dest: "/tmp/elasticsearch.deb"
         mode: '0644'
 
@@ -166,14 +224,23 @@
         name: elasticsearch
         state: started
         enabled: yes
-
+# 5. KIBANA
 - name: Setup Kibana (Native Package)
   hosts: kibana
   become: yes
   tasks:
+    - name: Wait for Elasticsearch to be ready
+      # The wait_for module pauses the playbook execution
+      wait_for:
+        host: "elasticsearch.ru-central1-a.internal"
+        port: 9200
+        state: started
+        delay: 10      # Don't even check for the first 10 seconds
+        timeout: 300   # Give up after 5 minutes (Elastic can be slow to boot)
+
     - name: Download Kibana 8.11.0
       get_url:
-        url: "https://artifacts.elastic.co/downloads/kibana/kibana-9.2.3-amd64.deb"
+        url: "https://artifacts.elastic.co/downloads/kibana/kibana-{{ elastic_version }}-amd64.deb"
         dest: "/tmp/kibana.deb"
         mode: '0644'
 
