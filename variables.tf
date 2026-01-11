@@ -19,7 +19,7 @@ variable "my_ip" {
 }
 
 variable "vm_preemptible" {
-  description = "If true, all VMs will be preemptible (cheaper but can be shut down)"
+  description = "If true, VMs will be preemptible"
   type        = bool
-  default     = true # Set to true by default to save money
+  default     = true
 }

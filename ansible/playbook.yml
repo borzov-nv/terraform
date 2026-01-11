@@ -133,12 +133,12 @@
         update_cache: yes
         cache_valid_time: 3600
 
-    - name: Update Zabbix Agent config
+    - name: Update Zabbix agent config
       template:
         src: zabbix_agentd.conf.j2
         dest: /etc/zabbix/zabbix_agentd.conf
 
-    - name: Restart zabbix-agent
+    - name: Restart Zabbix agent 
       service:
         name: zabbix-agent
         state: restarted
@@ -167,7 +167,7 @@
       apt:
         deb: "/tmp/elasticsearch.deb"
 
-    - name: Ensure ES is stopped
+    - name: Ensure Elasticsearch is stopped
       service:
         name: elasticsearch
         state: stopped
@@ -210,7 +210,7 @@
         enabled: yes
         daemon_reload: yes
 
-    - name: Wait for ES to wake up
+    - name: Wait for Elasticsearch
       ansible.builtin.wait_for:
         port: 9200
         delay: 20
@@ -311,20 +311,20 @@
       args:
         creates: /etc/filebeat/modules.d/nginx.yml
 
-    - name: Set strict permissions on Nginx module config
+    - name: Set permissions on Nginx module config
       file:
         path: /etc/filebeat/modules.d/nginx.yml
         owner: root
         group: root
         mode: 0644
 
-    - name: Initial Filebeat Setup (Dashboards & Templates)
+    - name: Filebeat Setup
       command: filebeat setup -e
       register: setup_log
       changed_when: "'Loaded dashboards' in setup_log.stdout"
       run_once: true
 
-    - name: Wait for Elastic Stack services to be ready
+    - name: Wait for Elastic services
       ansible.builtin.wait_for:
         host: "{{ item.host }}"
         port: "{{ item.port }}"
