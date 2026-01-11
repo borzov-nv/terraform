@@ -7,3 +7,5 @@
 *.tfstate.*
 terraform.tfvars
 ansible/group_vars/all.yml
+misc
+IPs

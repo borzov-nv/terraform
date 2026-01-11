@@ -1,8 +1,11 @@
 [all:vars]
 ansible_user=ubuntu
 ansible_ssh_private_key_file=~/.ssh/id_rsa
-# This is where the bastion_ip variable from Terraform is used
 ansible_ssh_common_args='-o ProxyJump=ubuntu@${bastion_ip} -o StrictHostKeyChecking=no'
+zabbix_ip=${zabbix_ip}
+
+[bastion]
+bastion ansible_host=${bastion}
 
 [webservers]
 %{ for vm in web_nodes ~}
@@ -10,9 +13,6 @@ ${vm.name} ansible_host=${vm.fqdn}
 %{ endfor ~}
 
 [monitoring]
-%{ for name, vm in monitor_nodes ~}
-${name} ansible_host=${vm.fqdn}
-%{ endfor ~}
-
-[elastic]
-elasticsearch ansible_host=${elastic_fqdn}
+zabbix ansible_host=${zabbix}
+kibana ansible_host=${kibana}
+elasticsearch ansible_host=${elasticsearch}

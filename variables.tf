@@ -8,6 +8,11 @@ variable "folder_id" {
   description = "The ID of the folder"
 }
 
+variable "servacc_id" {
+  type        = string
+  description = "The ID of the service account"
+}
+
 variable "my_ip" {
   type        = string
   description = "The public IP of the administrator"

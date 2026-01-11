@@ -1,0 +1,8 @@
+# /etc/zabbix/zabbix_agentd.conf
+Server=zabbix.ru-central1.internal
+ServerActive=zabbix.ru-central1.internal
+Hostname={{ inventory_hostname }}
+HostMetadata=Netology
+RefreshActiveChecks=120
+LogType=file
+LogFile=/var/log/zabbix-agent/zabbix_agentd.log

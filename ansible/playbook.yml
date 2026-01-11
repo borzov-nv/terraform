@@ -1,96 +1,19 @@
 ---
-# 1. ALL
-- name: Basic Setup
-  hosts: all
-  become: yes
-  tasks:
-    - name: Update apt cache
-      apt:
-        update_cache: yes
-
-# 2. WEB
-- name: Webserver Configuration
-  hosts: webservers
-  become: yes
-  tasks:
-    - name: Install Nginx
-      apt: 
-        name: nginx
-        state: present
-
-    - name: Create custom index.html
-      copy:
-        content: |
-          <html>
-          <head><title>Netology - BorzovES</title></head>
-          <body>
-            <h1>Это {{ inventory_hostname }}</h1>
-            <p>It's alive!</p>
-          </body>
-          </html>
-        dest: /var/www/html/index.html
-        #owner: www-data
-        #group: www-data
-        #mode: '0644'
-
-    - name: Download Filebeat
-      get_url:
-        url: "https://artifacts.elastic.co/downloads/beats/filebeat/filebeat-{{ elastic_version }}-amd64.deb"
-        dest: "/tmp/filebeat.deb"
-        mode: '0644'
-
-    - name: Install Filebeat
-      apt:
-        deb: "/tmp/filebeat.deb"
-
-    - name: Configure Filebeat
-      lineinfile:
-        path: /etc/filebeat/filebeat.yml
-        regexp: 'hosts: \["localhost:9200"\]'
-        line: '  hosts: ["elasticsearch.ru-central1-a.internal:9200"]'
-      notify: Restart Filebeat
-
-    - name: Install Zabbix Agent
-      apt:
-        name: zabbix-agent
-        state: present
-
-    - name: Point Zabbix Agent to Server
-      lineinfile:
-        path: /etc/zabbix/zabbix_agentd.conf
-        regexp: '^Server='
-        line: "Server=zabbix.ru-central1-a.internal"
-      notify: Restart Zabbix Agent
-
-  handlers:
-    - name: Restart Filebeat
-      service:
-        name: filebeat
-        state: restarted
-    - name: Restart Zabbix Agent
-      service:
-        name: zabbix-agent
-        state: restarted
-
-# 3. ZABBIX
-- name: Setup Zabbix Server, DB, and Frontend
+# ZABBIX
+- name: Setup Zabbix server
   hosts: zabbix
-  become: yes
+  become: true
   tasks:
-    - name: Download Zabbix Release Package
+    - name: Download Zabbix repo
       get_url:
         url: "https://repo.zabbix.com/zabbix/7.4/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_7.4+ubuntu22.04_all.deb"
         dest: "/tmp/zabbix-release.deb"
 
-    - name: Install Zabbix Repo
+    - name: Install Zabbix repo
       apt:
         deb: "/tmp/zabbix-release.deb"
 
-    - name: Update apt cache
-      apt: 
-        update_cache: yes
-
-    - name: Install MySQL, PHP, and Zabbix dependencies
+    - name: Install packages
       apt: 
         name:
           - nginx
@@ -103,11 +26,28 @@
           - zabbix-frontend-php
           - zabbix-nginx-conf
         state: present
+        update_cache: yes
 
-    - name: Enable Zabbix Nginx config
-      shell: |
-        sed -i 's/# listen 80;/listen 80;/' /etc/zabbix/nginx.conf
-        sed -i 's/# server_name example.com;/server_name _;/' /etc/zabbix/nginx.conf
+    - name: Deploy Zabbix Nginx configuration
+      ansible.builtin.template:
+        src: zabbix_nginx.conf.j2
+        dest: /etc/nginx/sites-available/zabbix.conf
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Enable Zabbix site and disable default
+      ansible.builtin.file:
+        path: "/etc/nginx/sites-enabled/{{ item.name }}"
+        src: "{{ item.src | default(omit) }}"
+        state: "{{ item.state }}"
+      loop:
+        - { name: 'default', state: 'absent' }
+        - { 
+            name: 'zabbix.conf', 
+            src: '/etc/nginx/sites-available/zabbix.conf', 
+            state: 'link' 
+          }
 
     - name: Symlink Zabbix Nginx config
       file:
@@ -121,14 +61,14 @@
         state: started
         enabled: yes
 
-    - name: Create Zabbix Database
+    - name: Create Zabbix DB
       mysql_db:
         name: zabbix
         encoding: utf8mb4
         collation: utf8mb4_bin
         login_unix_socket: /var/run/mysqld/mysqld.sock
 
-    - name: Create Zabbix DB User
+    - name: Create Zabbix DB user
       mysql_user:
         name: zabbix
         password: "{{ db_password }}"
@@ -141,10 +81,10 @@
         value: '1'
         login_unix_socket: /var/run/mysqld/mysqld.sock
 
-    - name: Import Initial Zabbix Schema
-      shell: zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql -uzabbix -p{{ db_password }} zabbix
+    - name: Import initial Zabbix schema
+      shell: zcat /usr/share/zabbix/sql-scripts/mysql/server.sql.gz | mysql -uzabbix -p'{{ db_password }}' zabbix && touch /etc/zabbix/.schema_imported
       args:
-        creates: /var/lib/mysql/zabbix/users.ibd
+        creates: /etc/zabbix/.schema_imported
 
     - name: Disable trust_function_creators after import
       mysql_variables:
@@ -152,54 +92,100 @@
         value: '0'
         login_unix_socket: /var/run/mysqld/mysqld.sock
 
-    - name: Configure Zabbix Server to use the DB
+    - name: Configure Zabbix DB password
       lineinfile:
         path: /etc/zabbix/zabbix_server.conf
         regexp: '^# DBPassword='
         line: "DBPassword={{ db_password }}"
 
-    - name: Start Services
+    - name: Restart services
       service:
         name: "{{ item }}"
         state: restarted
         enabled: yes
-      loop: [zabbix-server, nginx, php8.1-fpm]
+      loop: [php8.1-fpm, nginx, zabbix-server]
 
-# 4. ES
-- name: Setup Elasticsearch (Native Package)
-  hosts: elastic
-  become: yes
+# ALL
+- name: Basic setup
+  hosts: all
+  become: true
   tasks:
-    - name: Install System Dependencies
+
+    - name: Ensure jq is installed
+      ansible.builtin.package:
+        name: jq
+        state: present
+
+    - name: Download and Run Yandex Backup Installer
+      ansible.builtin.shell: |
+        curl -sSL https://storage.yandexcloud.net/backup-distributions/agent_installer.sh | bash
+
+    - name: Ensure the backup agent service is running and enabled
+      ansible.builtin.systemd:
+        name: yandex-backup-agent
+        state: started
+        enabled: yes
+
+    - name: Install Zabbix agent
       apt:
-        name:
-          - openjdk-17-jdk     # Standard Java environment
-          - wget                # For downloading the package
-          - apt-transport-https # For secure communication
-          - gnupg               # For handling keys (if needed)
+        name: zabbix-agent
         state: present
         update_cache: yes
+        cache_valid_time: 3600
 
-    - name: Increase Virtual Memory (mmap counts)
-      # Elasticsearch requires this to be at least 262144
-      sysctl:
-        name: vm.max_map_count
-        value: '262144'
+    - name: Update Zabbix Agent config
+      template:
+        src: zabbix_agentd.conf.j2
+        dest: /etc/zabbix/zabbix_agentd.conf
+
+    - name: Restart zabbix-agent
+      service:
+        name: zabbix-agent
+        state: restarted
+        enabled: yes
+
+# ES
+- name: Setup Elasticsearch
+  hosts: elasticsearch
+  become: true
+  tasks:
+
+    - name: Minimize swap usage
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: '1'
         state: present
         reload: yes
 
-    - name: Download Elasticsearch 8.11.0
+    - name: Download Elasticsearch
       get_url:
-        url: "https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-{{ elastic_version }}-amd64.deb"
+        url: "https://mirror.yandex.ru/mirrors/elastic/9/pool/main/e/elasticsearch/elasticsearch-{{ elastic_version }}-amd64.deb"
         dest: "/tmp/elasticsearch.deb"
-        mode: '0644'
+        mode: 0644
 
-    - name: Install Elasticsearch from deb
+    - name: Install Elasticsearch
       apt:
         deb: "/tmp/elasticsearch.deb"
 
-    - name: Set JVM Heap Size (Memory Dependency)
-      # Since you have 8GB RAM, we dedicate 4GB to the Heap
+    - name: Ensure ES is stopped
+      service:
+        name: elasticsearch
+        state: stopped
+
+    - name: Check if bootstrap.password exists in keystore
+      shell: /usr/share/elasticsearch/bin/elasticsearch-keystore list
+      register: keystore_contents
+      changed_when: false
+
+    - name: Add bootstrap password to Elasticsearch keystore
+      shell: |
+        set -o pipefail
+        echo "{{ elastic_password }}" | /usr/share/elasticsearch/bin/elasticsearch-keystore add -x 'bootstrap.password'
+      args:
+        executable: /bin/bash
+      when: "'bootstrap.password' not in keystore_contents.stdout"
+
+    - name: Set heap size
       copy:
         dest: /etc/elasticsearch/jvm.options.d/heap.options
         content: |
@@ -207,58 +193,150 @@
           -Xmx4g
         owner: root
         group: elasticsearch
-        mode: '0660'
+        mode: 0660
 
-    - name: Configure Elasticsearch for External Access
-      lineinfile:
-        path: /etc/elasticsearch/elasticsearch.yml
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      loop:
-        - { regexp: '^#network.host:', line: 'network.host: 0.0.0.0' }
-        - { regexp: '^xpack.security.enabled:', line: 'xpack.security.enabled: false' }
-        - { regexp: '^discovery.type:', line: 'discovery.type: single-node' }
+    - name: Configure Elasticsearch
+      ansible.builtin.template:
+        src: elasticsearch.yml.j2
+        dest: /etc/elasticsearch/elasticsearch.yml
+        owner: root
+        group: elasticsearch
+        mode: 0660
 
-    - name: Ensure Elasticsearch is started and enabled
+    - name: Start Elasticsearch
       service:
         name: elasticsearch
-        state: started
+        state: restarted
         enabled: yes
-# 5. KIBANA
-- name: Setup Kibana (Native Package)
-  hosts: kibana
-  become: yes
-  tasks:
-    - name: Wait for Elasticsearch to be ready
-      # The wait_for module pauses the playbook execution
-      wait_for:
-        host: "elasticsearch.ru-central1-a.internal"
-        port: 9200
-        state: started
-        delay: 10      # Don't even check for the first 10 seconds
-        timeout: 300   # Give up after 5 minutes (Elastic can be slow to boot)
+        daemon_reload: yes
 
-    - name: Download Kibana 8.11.0
+    - name: Wait for ES to wake up
+      ansible.builtin.wait_for:
+        port: 9200
+        delay: 20
+
+    - name: Set kibana_system password via API
+      ansible.builtin.uri:
+        url: "http://localhost:9200/_security/user/kibana_system/_password"
+        method: POST
+        user: "elastic"
+        password: "{{ elastic_password }}"
+        force_basic_auth: yes
+        body_format: json
+        body:
+          password: "{{ kibana_system_password }}"
+        validate_certs: no
+        status_code: 200
+      register: api_result
+      retries: 10
+      delay: 5
+      until: api_result.status == 200
+
+# KIBANA
+- name: Setup Kibana
+  hosts: kibana
+  become: true
+  tasks:
+    - name: Download Kibana
       get_url:
-        url: "https://artifacts.elastic.co/downloads/kibana/kibana-{{ elastic_version }}-amd64.deb"
+        url: "https://mirror.yandex.ru/mirrors/elastic/9/pool/main/k/kibana/kibana-{{ elastic_version }}-amd64.deb"
         dest: "/tmp/kibana.deb"
-        mode: '0644'
+        mode: 0644
 
     - name: Install Kibana
       apt:
         deb: "/tmp/kibana.deb"
 
     - name: Configure Kibana
-      lineinfile:
-        path: /etc/kibana/kibana.yml
-        regexp: "{{ item.regexp }}"
-        line: "{{ item.line }}"
-      loop:
-        - { regexp: '^#server.host:', line: 'server.host: "0.0.0.0"' }
-        - { regexp: '^#elasticsearch.hosts:', line: 'elasticsearch.hosts: ["http://elasticsearch.ru-central1-a.internal:9200"]' }
+      ansible.builtin.template:
+        src: templates/kibana.yml.j2
+        dest: /etc/kibana/kibana.yml
+        owner: root
+        group: kibana
+        mode: 0660
 
     - name: Start Kibana
       service:
         name: kibana
+        state: restarted
+        enabled: yes
+
+# WEB
+- name: Webserver configuration
+  hosts: webservers
+  become: true
+  tasks:
+    - name: Install Nginx
+      apt: 
+        name: nginx
+        state: present
+
+    - name: Create custom index.html
+      copy:
+        content: |
+          <html>
+          <head><title>Netology - BorzovES</title></head>
+          <body>
+            <h1>This is {{ inventory_hostname }}</h1>
+            <p>It's alive</p>
+          </body>
+          </html>
+        dest: /var/www/html/index.html
+
+    - name: Download Filebeat
+      get_url:
+        url: "https://mirror.yandex.ru/mirrors/elastic/9/pool/main/f/filebeat/filebeat-{{ elastic_version }}-amd64.deb"
+        dest: "/tmp/filebeat.deb"
+        mode: 0644
+
+    - name: Install Filebeat
+      apt:
+        deb: "/tmp/filebeat.deb"
+
+    - name: Ensure Filebeat is stopped
+      service:
+        name: filebeat
+        state: stopped
+
+    - name: Deploy Filebeat Configuration
+      template:
+        src: filebeat.yml.j2
+        dest: /etc/filebeat/filebeat.yml
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Enable Nginx module
+      command: filebeat modules enable nginx
+      args:
+        creates: /etc/filebeat/modules.d/nginx.yml
+
+    - name: Set strict permissions on Nginx module config
+      file:
+        path: /etc/filebeat/modules.d/nginx.yml
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Initial Filebeat Setup (Dashboards & Templates)
+      command: filebeat setup -e
+      register: setup_log
+      changed_when: "'Loaded dashboards' in setup_log.stdout"
+      run_once: true
+
+    - name: Wait for Elastic Stack services to be ready
+      ansible.builtin.wait_for:
+        host: "{{ item.host }}"
+        port: "{{ item.port }}"
         state: started
+        delay: 5
+        timeout: 300
+      loop:
+        - { host: 'elasticsearch.ru-central1.internal', port: 9200 }
+        - { host: 'kibana.ru-central1.internal', port: 5601 }
+
+    - name: Ensure Filebeat is running
+      service:
+        name: filebeat
+        state: restarted
         enabled: yes

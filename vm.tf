@@ -1,9 +1,9 @@
-# 1. Get the latest Ubuntu Image
+# ОБРАЗ
 data "yandex_compute_image" "ubuntu" {
   family = "ubuntu-2204-lts"
 }
 
-# 2. Bastion (Public)
+# БАСТИОН
 resource "yandex_compute_instance" "bastion" {
   name        = "bastion"
   hostname    = "bastion"
@@ -13,7 +13,7 @@ resource "yandex_compute_instance" "bastion" {
   resources {
     cores         = 2
     memory        = 2
-    core_fraction = 20 # Saves money for lab/dev
+    core_fraction = 20
   }
 
   boot_disk {
@@ -25,25 +25,26 @@ resource "yandex_compute_instance" "bastion" {
   network_interface {
     subnet_id          = yandex_vpc_subnet.public.id
     nat                = true
-    security_group_ids = [yandex_vpc_security_group.bastion_sg.id]
+    security_group_ids = [yandex_vpc_security_group.bastion_sg.id, yandex_vpc_security_group.basic_sg.id]
   }
 
+  service_account_id = var.servacc_id
+
   metadata = {
+    install-cloud-backup = "yes"
     ssh-keys = "ubuntu:${file("~/.ssh/id_rsa.pub")}"
   }
 
   scheduling_policy {
     preemptible = var.vm_preemptible
   }
-
 }
 
-# 3. Two Private Webservers
+# ВЕБСЕРВЕРЫ
 resource "yandex_compute_instance" "web" {
   count       = 2
   name        = "web-${count.index + 1}"
   hostname    = "web-${count.index + 1}"
-  # We spread them across zones A and B for high availability
   zone        = count.index == 0 ? "ru-central1-a" : "ru-central1-b"
   platform_id = "standard-v3"
 
@@ -60,12 +61,14 @@ resource "yandex_compute_instance" "web" {
   }
 
   network_interface {
-    # Reference the specific private subnet based on the zone
     subnet_id          = count.index == 0 ? yandex_vpc_subnet.private-1.id : yandex_vpc_subnet.private-2.id
-    security_group_ids = [yandex_vpc_security_group.web_sg.id]
+    security_group_ids = [yandex_vpc_security_group.web_sg.id, yandex_vpc_security_group.basic_sg.id]
   }
 
+  service_account_id = var.servacc_id
+  
   metadata = {
+    install-cloud-backup = "yes"
     ssh-keys = "ubuntu:${file("~/.ssh/id_rsa.pub")}"
   }
 
@@ -74,17 +77,16 @@ resource "yandex_compute_instance" "web" {
   }
 }
 
-# 4. Monitoring: Zabbix and Kibana (Public)
-resource "yandex_compute_instance" "monitoring" {
-  for_each    = toset(["zabbix", "kibana"])
-  name        = each.key
-  hostname    = each.key
+# ZABBIX
+resource "yandex_compute_instance" "zabbix" {
+  name        = "zabbix"
+  hostname    = "zabbix"
   zone        = "ru-central1-a"
   platform_id = "standard-v3"
 
   resources {
     cores  = 2
-    memory = 4 # UI and Zabbix need slightly more RAM
+    memory = 4
     core_fraction = 20
   }
 
@@ -97,20 +99,59 @@ resource "yandex_compute_instance" "monitoring" {
   network_interface {
     subnet_id          = yandex_vpc_subnet.public.id
     nat                = true
-    security_group_ids = [yandex_vpc_security_group.monitoring_sg.id]
+    security_group_ids = [yandex_vpc_security_group.zabbix_sg.id, yandex_vpc_security_group.basic_sg.id]
   }
 
+  service_account_id = var.servacc_id
+  
   metadata = {
+    install-cloud-backup = "yes"
     ssh-keys = "ubuntu:${file("~/.ssh/id_rsa.pub")}"
   }
 
   scheduling_policy {
     preemptible = var.vm_preemptible
   }
-
 }
 
-# 5. Elasticsearch (Private)
+# KIBANA
+resource "yandex_compute_instance" "kibana" {
+  name        = "kibana"
+  hostname    = "kibana"
+  zone        = "ru-central1-a"
+  platform_id = "standard-v3"
+
+  resources {
+    cores  = 2
+    memory = 4
+    core_fraction = 20
+  }
+
+  boot_disk {
+    initialize_params {
+      image_id = data.yandex_compute_image.ubuntu.id
+    }
+  }
+
+  network_interface {
+    subnet_id          = yandex_vpc_subnet.public.id
+    nat                = true
+    security_group_ids = [yandex_vpc_security_group.kibana_sg.id, yandex_vpc_security_group.basic_sg.id]
+  }
+
+  service_account_id = var.servacc_id
+  
+  metadata = {
+    install-cloud-backup = "yes"
+    ssh-keys = "ubuntu:${file("~/.ssh/id_rsa.pub")}"
+  }
+
+  scheduling_policy {
+    preemptible = var.vm_preemptible
+  }
+}
+
+# ELASTICSEARCH
 resource "yandex_compute_instance" "elasticsearch" {
   name        = "elasticsearch"
   hostname    = "elasticsearch"
@@ -118,7 +159,7 @@ resource "yandex_compute_instance" "elasticsearch" {
   platform_id = "standard-v3"
 
   resources {
-    cores  = 4 # Elastic is heavy
+    cores  = 4
     memory = 8
     core_fraction = 20
   }
@@ -131,10 +172,13 @@ resource "yandex_compute_instance" "elasticsearch" {
 
   network_interface {
     subnet_id          = yandex_vpc_subnet.private-1.id
-    security_group_ids = [yandex_vpc_security_group.elastic_sg.id]
+    security_group_ids = [yandex_vpc_security_group.elastic_sg.id, yandex_vpc_security_group.basic_sg.id]
   }
 
+  service_account_id = var.servacc_id
+  
   metadata = {
+    install-cloud-backup = "yes"
     ssh-keys = "ubuntu:${file("~/.ssh/id_rsa.pub")}"
   }
 
@@ -143,6 +187,7 @@ resource "yandex_compute_instance" "elasticsearch" {
   }
 }
 
+# ЦЕЛЕВАЯ ГРУППА
 resource "yandex_alb_target_group" "web_targets" {
   name = "web-target-group"
 
@@ -155,6 +200,7 @@ resource "yandex_alb_target_group" "web_targets" {
   }
 }
 
+# БЭКЕНД
 resource "yandex_alb_backend_group" "web_backends" {
   name = "web-backend-group"
 
@@ -168,8 +214,12 @@ resource "yandex_alb_backend_group" "web_backends" {
       panic_threshold = 50
     }    
     healthcheck {
-      timeout             = "1s"
-      interval            = "1s"
+      timeout             = "10s"
+      interval            = "60s"
+      healthcheck_port = 80
+      healthy_threshold   = 2
+      unhealthy_threshold = 3
+
       http_healthcheck {
         path = "/"
       }
@@ -177,24 +227,32 @@ resource "yandex_alb_backend_group" "web_backends" {
   }
 }
 
+# РОУТЕР
 resource "yandex_alb_http_router" "web_router" {
   name = "web-http-router"
 }
 
+# ХОСТ
 resource "yandex_alb_virtual_host" "web_vhost" {
   name           = "web-virtual-host"
   http_router_id = yandex_alb_http_router.web_router.id
   route {
     name = "root-route"
     http_route {
+      http_match {
+        path {
+          prefix = "/"
+        }
+      }
       http_route_action {
         backend_group_id = yandex_alb_backend_group.web_backends.id
-        timeout          = "3s"
+        timeout          = "60s"
       }
     }
   }
 }
 
+# БАЛАНСИРОВЩИК
 resource "yandex_alb_load_balancer" "main_alb" {
   name               = "main-load-balancer"
   network_id         = yandex_vpc_network.main.id
@@ -205,15 +263,17 @@ resource "yandex_alb_load_balancer" "main_alb" {
       zone_id   = "ru-central1-a"
       subnet_id = yandex_vpc_subnet.public.id
     }
+    location {
+      zone_id   = "ru-central1-b"
+      subnet_id = yandex_vpc_subnet.private-2.id 
+    }
   }
 
   listener {
     name = "web-listener"
     endpoint {
       address {
-        external_ipv4_address {
-          # This will provide a public IP automatically
-        }
+        external_ipv4_address {}
       }
       ports = [80]
     }
@@ -225,31 +285,80 @@ resource "yandex_alb_load_balancer" "main_alb" {
   }
 }
 
+# БЭКАПЫ
+resource "yandex_backup_policy" "netology_backup_policy" {
+  name = "netology-backup-policy"
+
+  scheduling {
+    enabled = true
+    backup_sets {
+      execute_by_time {
+        type = "DAILY"
+        repeat_at = ["00:00"]
+        }
+    }
+  }
+
+  retention {
+    after_backup = false
+    rules {
+      max_count = 7
+    }
+  }
+
+  reattempts {}
+  vm_snapshot_reattempts {}
+}
+
+resource "yandex_backup_policy_bindings" "netology_bindings" {
+for_each = merge(
+    { for i, v in yandex_compute_instance.web : v.name => v.id },
+    {
+      "bastion"       = yandex_compute_instance.bastion.id,
+      "elasticsearch" = yandex_compute_instance.elasticsearch.id,
+      "kibana"        = yandex_compute_instance.kibana.id,
+      "zabbix"        = yandex_compute_instance.zabbix.id
+    }
+  )
+
+  policy_id   = yandex_backup_policy.netology_backup_policy.id
+  instance_id = each.value
+}
+
+# ИНВЕНТАРЬ ДЛЯ АНСИБЛА
 resource "local_file" "ansible_inventory" {
   content = templatefile("hosts.tftpl",
     {
       bastion_ip     = yandex_compute_instance.bastion.network_interface.0.nat_ip_address
+      zabbix_ip      = yandex_compute_instance.zabbix.network_interface.0.nat_ip_address
+      bastion        = yandex_compute_instance.bastion.fqdn
       web_nodes      = yandex_compute_instance.web[*]
-      monitor_nodes  = yandex_compute_instance.monitoring
-      elastic_fqdn   = yandex_compute_instance.elasticsearch.fqdn
+      zabbix         = yandex_compute_instance.zabbix.fqdn
+      kibana         = yandex_compute_instance.kibana.fqdn
+      elasticsearch  = yandex_compute_instance.elasticsearch.fqdn
     }
   )
   filename = "ansible/hosts.ini" 
 }
 
-output "bastion_public_ip" {
-  description = "Connect to this IP for SSH/Ansible management"
-  value       = yandex_compute_instance.bastion.network_interface.0.nat_ip_address
-}
+# АДРЕСА
+resource "local_file" "IPs" {
+  filename = "${path.module}/IPs"
+  content  = <<EOT
+=== PUBLIC IPs ===
+Bastion SSH:  ${yandex_compute_instance.bastion.network_interface.0.nat_ip_address}
+Zabbix Web:   http://${yandex_compute_instance.zabbix.network_interface.0.nat_ip_address}
+Kibana Web:   http://${yandex_compute_instance.kibana.network_interface.0.nat_ip_address}:5601
+Website URL:  http://${yandex_alb_load_balancer.main_alb.listener.0.endpoint.0.address.0.external_ipv4_address.0.address}
 
-output "web_site_url" {
-  description = "Visit this IP in your browser to see your website"
-  value       = "http://${yandex_alb_load_balancer.main_alb.listener.0.endpoint.0.address.0.external_ipv4_address.0.address}"
-}
-
-output "monitoring_ips" {
-  description = "Public IPs for Zabbix and Kibana"
-  value = {
-    for k, v in yandex_compute_instance.monitoring : k => v.network_interface.0.nat_ip_address
-  }
+=== SSH JUMP COMMANDS ===
+%{ for instance in concat(
+    yandex_compute_instance.web[*],
+    [yandex_compute_instance.elasticsearch],
+    [yandex_compute_instance.kibana],
+    [yandex_compute_instance.zabbix]
+  ) ~}
+${format("%-15s", instance.name)}: ssh -J ubuntu@${yandex_compute_instance.bastion.network_interface.0.nat_ip_address} ubuntu@${instance.network_interface.0.ip_address}
+%{ endfor ~}
+EOT
 }

@@ -1,0 +1,7 @@
+server.host: "0.0.0.0"
+server.name: "kibana"
+elasticsearch.hosts: ["http://elasticsearch.ru-central1.internal:9200"]
+
+# Credentials for the system user
+elasticsearch.username: "kibana_system"
+elasticsearch.password: "{{ kibana_system_password }}"
