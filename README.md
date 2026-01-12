@@ -6,13 +6,13 @@
 
 Пароли для создаваемых ансиблом учеток - в приватном файле group_vars/all.yml
 
-![](map.png)
+![](img/map.png)
 
-![](vms.png)
+![](img/vms.png)
 
-![](alb.png)
+![](img/alb.png)
 
-![](snapshot-schedule.png)
+![](img/snapshot-schedule.png)
 
-![](snapshots.png)
+![](img/snapshots.png)
 
